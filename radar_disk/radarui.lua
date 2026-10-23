@@ -269,7 +269,7 @@ end
 -- Converts the canvas to teletext characters and blits every row together
 -- with the info panel. Each character can show only two colours, so a cell
 -- keeps its most common colour and its most important other colour.
-local function render(state, L, pix, prio, lines)
+local function render(state, L, pix, prio, lines, overlay)
     local device = state.device
     local ZW = L.ZW
     local bg = HEX[index(ui.config.colors.background)]
@@ -306,9 +306,16 @@ local function render(state, L, pix, prio, lines)
                     bit = bit * 2
                 end
             end
-            text[#text + 1] = string.char(code)
-            fg[#fg + 1] = HEX[fore]
-            bk[#bk + 1] = HEX[back]
+            local mark = overlay and overlay.row == row + 1 and overlay.cells[col + 1]
+            if mark then
+                text[#text + 1] = mark
+                fg[#fg + 1] = HEX[overlay.color]
+                bk[#bk + 1] = HEX[a] -- the cell's main colour (usually background)
+            else
+                text[#text + 1] = string.char(code)
+                fg[#fg + 1] = HEX[fore]
+                bk[#bk + 1] = HEX[back]
+            end
         end
 
         if L.info then
@@ -381,7 +388,7 @@ local function paint(state)
         return L.cx + right * k, L.cy - up * k
     end
 
-    local markers, selected = {}, findTarget(targets, state.selected)
+    local markers, selected, overlay = {}, findTarget(targets, state.selected), nil
     local function marker(t)
         local px, py = project(t.x - ox, t.z - oz)
         local ddx, ddy = px - L.cx, py - L.cy
@@ -407,19 +414,18 @@ local function paint(state)
             local x1, y1 = project(selected.x - ox + v.x * ticks, selected.z - oz + v.z * ticks)
             drawLine(pix, L, x0, y0, x1, y1, index(c.velocity))
         end
-        local x0, y0 = marker(selected)
+        -- Selection mark: arrow characters in the cells left and right of the
+        -- marker (► ■ ◄), so the mark is one text row high.
+        local x0, _, _, py = marker(selected)
+        local row = math.floor(py / 3) + 1
+        local left, right = math.floor(x0 / 2), math.floor((x0 + 1) / 2) + 2
         local col = index(c.selected)
-        for i = -2, 3 do
-            setPixel(pix, L, x0 + i, y0 - 2, col)
-            setPixel(pix, L, x0 + i, y0 + 3, col)
-            setPixel(pix, L, x0 - 2, y0 + i, col)
-            setPixel(pix, L, x0 + 3, y0 + i, col)
-        end
+        overlay = { row = row, cells = { [left] = "\16", [right] = "\17" }, color = col }
     end
     state.markers = markers
 
     local lines = L.info and panelLines(state, L, targets, info, front, range, selected) or nil
-    render(state, L, pix, prio, lines)
+    render(state, L, pix, prio, lines, overlay)
     return selected
 end
 

@@ -5,20 +5,23 @@ radar - helper library for CC Optical (ccoptical) entity sensors.
     local sensor = peripheral.find("entity_radar")
     local targets, info = radar.scan(sensor, { "sublevel", "object_large" }, true)
 
-Every call to radar.scan forces a sensor scan, passes the raw positions through
-a per-target alpha-beta filter (removes radar noise, estimates velocity) and
-rounds the result. Call it regularly: the more samples, the better the estimate.
+Every call to radar.scan runs several sensor scans at once (they land in the
+same game tick, each with its own random noise), puts every sample on the
+sphere of the exact distance the sensor reports and averages them. The
+position therefore has no lag. Velocity is a least-squares fit over the
+positions of the last config.velocityWindow ticks.
 ]]
 
-local radar = { version = "1.4.0" }
+local radar = { version = "1.5.0" }
 
 radar.config = {
     decimals = 2,         -- rounding of x/y/z and distance (2 = 0.01 block)
     velocityDecimals = 3, -- rounding of velocity and speed (blocks per tick)
-    alpha = 0.15,         -- steady-state position gain of the noise filter
-    beta = 0.012,         -- steady-state velocity gain (lower = smoother, slower)
+    scans = 4,            -- sensor scans averaged per radar.scan call (1 = no averaging)
+    velocityWindow = 20,  -- ticks of position history used for velocity
     maxGapTicks = 60,     -- forget a target that was not seen for this many ticks
     gpsTimeout = 2,       -- seconds to wait for gps.locate
+    structureCheck = 2,   -- seconds between checks whether the computer is on a structure
 }
 
 -- Per-sensor state, keyed by peripheral name.
@@ -96,9 +99,21 @@ local function locate()
     return { x, y, z }
 end
 
+-- CC: Sable calls run on the server thread and cost a game tick each, so
+-- whether the computer is on a structure (and which one) is cached for
+-- config.structureCheck seconds.
+local structureCache = { time = -math.huge }
+
 local function onStructure()
-    return type(sublevel) == "table" and type(sublevel.isInPlotGrid) == "function"
-        and sublevel.isInPlotGrid()
+    if os.clock() - structureCache.time < radar.config.structureCheck then
+        return structureCache.value
+    end
+    local value = type(sublevel) == "table" and type(sublevel.isInPlotGrid) == "function"
+        and sublevel.isInPlotGrid() or false
+    structureCache.value = value
+    structureCache.uuid = value and sublevel.getUniqueId() or nil
+    structureCache.time = os.clock()
+    return value
 end
 
 -- Reads the structure pose. CC: Sable wraps orientation into a quaternion
@@ -177,58 +192,102 @@ local function calibrateGround()
     host.ground = { nearest(g[1]), nearest(g[2]), nearest(g[3]) }
 end
 
--- World position of the sensor block centre (the point ccoptical measures from).
--- state.offset = sensor block - computer block, in structure axes on a structure.
-local function sensorOrigin(state)
-    local d = state.offset
+-- Makes sure the computer position is known (GPS calibration when needed).
+local function ensureHost(state)
     if onStructure() then
         if state.origin then
             error("radar: setOrigin is for ground sensors, on a structure use radar.setOffset", 0)
         end
-        if not host.structure or host.structure.uuid ~= sublevel.getUniqueId() then
+        if not host.structure or host.structure.uuid ~= structureCache.uuid then
             calibrateStructure()
         end
-        local b = host.structure.block
-        return toWorld(readPose(), { b[1] + d[1] + 0.5, b[2] + d[2] + 0.5, b[3] + d[3] + 0.5 }), "structure"
+    elseif not state.origin and not host.ground then
+        calibrateGround()
     end
+end
 
+-- World position of the sensor block centre (the point ccoptical measures from).
+-- state.offset = sensor block - computer block, in structure axes on a structure.
+-- pose: structure pose read together with the scans (nil = read now).
+local function sensorOrigin(state, pose)
+    ensureHost(state)
+    local d = state.offset
+    if onStructure() then
+        local b = host.structure.block
+        return toWorld(pose or readPose(), { b[1] + d[1] + 0.5, b[2] + d[2] + 0.5, b[3] + d[3] + 0.5 }), "structure"
+    end
     if state.origin then return state.origin, "manual" end
-    if not host.ground then calibrateGround() end
     local b = host.ground
     return { b[1] + d[1] + 0.5, b[2] + d[2] + 0.5, b[3] + d[3] + 0.5 }, "ground"
 end
 
--- Alpha-beta filter step. The first samples use "growing memory" gains (an exact
--- least-squares fit), which then settle to config.alpha/beta. Exact (optical)
--- sensors have no noise, so they use alpha = beta = 1 (plain finite difference).
-local function updateTrack(tracks, id, measured, tick, exact)
-    local t = tracks[id]
-    if t then
-        local dt = tick - t.tick
-        if dt <= 0 then return t end -- same tick, nothing new
-        if dt > radar.config.maxGapTicks then t = nil end
+-- Runs config.scans sensor scans and (on a structure) a pose read as parallel
+-- coroutines. Each call is a server-thread task; queued together they are
+-- executed in the same game tick, so the samples differ only by noise.
+local function multiScan(sensor, count, wantPose)
+    local raws, pose, failure = {}, nil, nil
+    local jobs = {}
+    for i = 1, count do
+        jobs[i] = function()
+            local ok, raw = pcall(sensor.scan)
+            if ok then raws[#raws + 1] = raw else failure = raw end
+        end
     end
-    if not t then
-        t = { p = measured, v = { 0, 0, 0 }, n = 1, tick = tick }
-        tracks[id] = t
-        return t
+    if wantPose then
+        jobs[#jobs + 1] = function()
+            local ok, p = pcall(readPose)
+            if ok then pose = p end
+        end
     end
+    if #jobs == 1 then jobs[1]() else parallel.waitForAll(table.unpack(jobs)) end
+    if #raws == 0 then error("radar: scan failed: " .. tostring(failure), 0) end
+    return raws, pose
+end
 
-    local dt = tick - t.tick
-    local n = t.n + 1
-    local a, b = 1, 1
-    if not exact then
-        a = math.max(2 * (2 * n - 1) / (n * (n + 1)), radar.config.alpha)
-        b = math.max(6 / (n * (n + 1)), radar.config.beta)
+-- Track = position history of one target: { {tick, x, y, z, weight}, ... }.
+-- Velocity is the weighted least-squares slope over the last velocityWindow
+-- ticks. Exact (optical) sensors use the last two points.
+local function trackVelocity(points, exact)
+    local n = #points
+    if n < 2 then return { 0, 0, 0 } end
+    if exact then
+        local a, b = points[n - 1], points[n]
+        local dt = b[1] - a[1]
+        return { (b[2] - a[2]) / dt, (b[3] - a[3]) / dt, (b[4] - a[4]) / dt }
     end
-    for i = 1, 3 do
-        local predicted = t.p[i] + t.v[i] * dt
-        local residual = measured[i] - predicted
-        t.p[i] = predicted + a * residual
-        t.v[i] = t.v[i] + b * residual / dt
+    local sw, st = 0, 0
+    for _, p in ipairs(points) do sw, st = sw + p[5], st + p[5] * p[1] end
+    local tm = st / sw
+    local stt, v = 0, { 0, 0, 0 }
+    for _, p in ipairs(points) do
+        local dt = p[1] - tm
+        stt = stt + p[5] * dt * dt
+        for i = 1, 3 do v[i] = v[i] + p[5] * dt * p[i + 1] end
     end
-    t.n, t.tick = n, tick
-    return t
+    if stt <= 0 then return { 0, 0, 0 } end
+    return { v[1] / stt, v[2] / stt, v[3] / stt }
+end
+
+local function updateTrack(tracks, id, point, exact)
+    local cfg = radar.config
+    local track = tracks[id]
+    if track and point[1] - track.tick > cfg.maxGapTicks then track = nil end
+    if not track then
+        track = { points = {}, first = point[1] }
+        tracks[id] = track
+    end
+    local points = track.points
+    if points[#points] and points[#points][1] == point[1] then
+        points[#points] = point -- same tick again: keep the newer batch
+    else
+        points[#points + 1] = point
+    end
+    while #points > 2 and point[1] - points[1][1] > cfg.velocityWindow do
+        table.remove(points, 1)
+    end
+    track.tick = point[1]
+    track.velocity = trackVelocity(points, exact)
+    return track
 end
 
 --- Scan with a sensor.
@@ -248,28 +307,60 @@ function radar.scan(sensor, filter, global)
     local state = getState(name)
     if state.exact == nil then state.exact = sensor.isOptical() end
 
-    -- Origin is read right after the scan so a moving structure's pose matches it.
-    local raw = sensor.scan()
+    local cfg = radar.config
+    local count = state.exact and 1 or math.max(1, math.floor(cfg.scans))
+    if global then ensureHost(state) end -- GPS calibration before the timed scans
+    local structure = onStructure()
+    local raws, pose = multiScan(sensor, count, structure)
+
     local origin, mode
-    if global then origin, mode = sensorOrigin(state) end
+    if global then origin, mode = sensorOrigin(state, pose) end
     local orientation
-    if onStructure() then
-        local q = readPose().q
+    if pose then
+        local q = pose.q
         orientation = { x = q[1], y = q[2], z = q[3], w = q[4] }
     end
-    local tick = raw.lastScanTick
-    local tracks = state.tracks[global]
-    local cfg = radar.config
-    local targets = {}
 
-    -- Every detection updates its track, so changing the filter between calls
-    -- does not break velocity estimation.
-    for _, d in ipairs(raw.detections) do
-        local measured = { d.x, d.y, d.z }
-        if origin then
-            for i = 1, 3 do measured[i] = measured[i] + origin[i] end
+    -- Group the samples of all scans by target.
+    local groups, order, tick = {}, {}, -math.huge
+    for _, raw in ipairs(raws) do
+        local t = raw.lastScanTick
+        if t > tick then tick = t end
+        for _, d in ipairs(raw.detections) do
+            local g = groups[d.id]
+            if not g then
+                g = { samples = {}, meta = d, tick = t }
+                groups[d.id] = g
+                order[#order + 1] = d.id
+            elseif t >= g.tick then
+                g.meta, g.tick = d, t
+            end
+            g.samples[#g.samples + 1] = { t, d.x, d.y, d.z }
         end
-        local t = updateTrack(tracks, d.id, measured, tick, state.exact)
+    end
+
+    local tracks = state.tracks[global]
+    local targets = {}
+    for _, id in ipairs(order) do
+        local g = groups[id]
+        local d = g.meta
+        -- Average the samples. Scans that landed in an earlier tick (server
+        -- busy) are moved forward with the previous velocity estimate.
+        local old = tracks[id]
+        local v0 = old and old.velocity or { 0, 0, 0 }
+        local p = { 0, 0, 0 }
+        for _, s in ipairs(g.samples) do
+            local dt = g.tick - s[1]
+            for i = 1, 3 do p[i] = p[i] + s[i + 1] + v0[i] * dt end
+        end
+        local n = #g.samples
+        for i = 1, 3 do
+            p[i] = p[i] / n
+            if origin then p[i] = p[i] + origin[i] end
+        end
+        -- Every target updates its track, so changing the filter between calls
+        -- does not break velocity estimation.
+        local track = updateTrack(tracks, id, { g.tick, p[1], p[2], p[3], n }, state.exact)
 
         if not types or types[string.lower(d.type)] then
             local target = {}
@@ -278,18 +369,19 @@ function radar.scan(sensor, filter, global)
             -- subLevelUUID. subLevelUUID stays only for an entity aboard a structure.
             target.uuid, target.id = d.id, nil
             if target.subLevelUUID == d.id then target.subLevelUUID = nil end
-            target.x = round(t.p[1], cfg.decimals)
-            target.y = round(t.p[2], cfg.decimals)
-            target.z = round(t.p[3], cfg.decimals)
+            target.x = round(p[1], cfg.decimals)
+            target.y = round(p[2], cfg.decimals)
+            target.z = round(p[3], cfg.decimals)
             target.distance = round(d.distance, cfg.decimals)
-            local vx, vy, vz = t.v[1], t.v[2], t.v[3]
+            local vx, vy, vz = track.velocity[1], track.velocity[2], track.velocity[3]
             target.velocity = {
                 x = round(vx, cfg.velocityDecimals),
                 y = round(vy, cfg.velocityDecimals),
                 z = round(vz, cfg.velocityDecimals),
             }
             target.speed = round(math.sqrt(vx * vx + vy * vy + vz * vz), cfg.velocityDecimals)
-            target.samples = t.n
+            target.samples = n
+            target.tracked = g.tick - track.first
             targets[#targets + 1] = target
         end
     end
@@ -301,7 +393,8 @@ function radar.scan(sensor, filter, global)
     return targets, {
         sensor = name,
         tick = tick,
-        total = #raw.detections,
+        total = #order,
+        scans = #raws,
         global = global,
         mode = mode,
         origin = origin and { x = origin[1], y = origin[2], z = origin[3] } or nil,
@@ -348,6 +441,7 @@ end
 -- if calibration on a structure failed). Shared by all sensors.
 function radar.calibrate()
     host.ground, host.structure = nil, nil
+    structureCache.time = -math.huge
     if onStructure() then calibrateStructure() else calibrateGround() end
     for _, state in pairs(sensors) do state.tracks[true] = {} end
 end
@@ -370,7 +464,7 @@ end
 function radar.blockToWorld(dx, dy, dz)
     checkNumbers("blockToWorld", dx, dy, dz)
     if onStructure() then
-        if not host.structure or host.structure.uuid ~= sublevel.getUniqueId() then
+        if not host.structure or host.structure.uuid ~= structureCache.uuid then
             calibrateStructure()
         end
         local b = host.structure.block
