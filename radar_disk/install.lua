@@ -5,11 +5,17 @@ local args = { ... }
 local here = fs.getDir(shell.getRunningProgram())
 
 local LIB = "lib/radar.lua"
+local UI = "lib/radarui.lua"
+local BALLISTICS = "lib/ballistics.lua"
 local LOADER = "startup/00_radarlib.lua"
 local EXAMPLE = "radar_example.lua"
+local UI_EXAMPLE = "radar_ui_example.lua"
+local GUN_EXAMPLE = "gun_example.lua"
 
 if args[1] == "remove" then
     fs.delete(LIB)
+    fs.delete(UI)
+    fs.delete(BALLISTICS)
     fs.delete(LOADER)
     print("radar library removed. Reboot to unload it.")
     return
@@ -28,15 +34,23 @@ local function copy(from, to)
 end
 
 copy("radar.lua", LIB)
+copy("radarui.lua", UI)
+copy("ballistics.lua", BALLISTICS)
 copy("loader.lua", LOADER)
 if not fs.exists(EXAMPLE) then copy("example.lua", EXAMPLE) end
+if not fs.exists(UI_EXAMPLE) then copy("example_ui.lua", UI_EXAMPLE) end
+if not fs.exists(GUN_EXAMPLE) then copy("example_gun.lua", GUN_EXAMPLE) end
 
 -- Register right away, so no reboot is needed.
 shell.run("/" .. LOADER)
 
 print("radar library installed:")
 print("  /" .. LIB)
+print("  /" .. UI)
+print("  /" .. BALLISTICS)
 print("  /" .. LOADER)
-print("  /" .. EXAMPLE .. " (example)")
+print("  /" .. EXAMPLE .. ", /" .. UI_EXAMPLE .. ", /" .. GUN_EXAMPLE .. " (examples)")
 print('Use: local radar = require("radar")')
+print('     local ui = require("radarui")')
+print('     local ballistics = require("ballistics")')
 print("You can remove the disk now.")

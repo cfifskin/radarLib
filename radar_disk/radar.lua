@@ -10,7 +10,7 @@ a per-target alpha-beta filter (removes radar noise, estimates velocity) and
 rounds the result. Call it regularly: the more samples, the better the estimate.
 ]]
 
-local radar = { version = "1.1.0" }
+local radar = { version = "1.4.0" }
 
 radar.config = {
     decimals = 2,         -- rounding of x/y/z and distance (2 = 0.01 block)
@@ -252,6 +252,11 @@ function radar.scan(sensor, filter, global)
     local raw = sensor.scan()
     local origin, mode
     if global then origin, mode = sensorOrigin(state) end
+    local orientation
+    if onStructure() then
+        local q = readPose().q
+        orientation = { x = q[1], y = q[2], z = q[3], w = q[4] }
+    end
     local tick = raw.lastScanTick
     local tracks = state.tracks[global]
     local cfg = radar.config
@@ -269,6 +274,10 @@ function radar.scan(sensor, filter, global)
         if not types or types[string.lower(d.type)] then
             local target = {}
             for k, v in pairs(d) do target[k] = v end
+            -- One identifier: for a structure ccoptical repeats its UUID in id and
+            -- subLevelUUID. subLevelUUID stays only for an entity aboard a structure.
+            target.uuid, target.id = d.id, nil
+            if target.subLevelUUID == d.id then target.subLevelUUID = nil end
             target.x = round(t.p[1], cfg.decimals)
             target.y = round(t.p[2], cfg.decimals)
             target.z = round(t.p[3], cfg.decimals)
@@ -296,6 +305,8 @@ function radar.scan(sensor, filter, global)
         global = global,
         mode = mode,
         origin = origin and { x = origin[1], y = origin[2], z = origin[3] } or nil,
+        range = sensor.getRange and sensor.getRange() or nil,
+        orientation = orientation,
     }
 end
 
@@ -339,6 +350,38 @@ function radar.calibrate()
     host.ground, host.structure = nil, nil
     if onStructure() then calibrateStructure() else calibrateGround() end
     for _, state in pairs(sensors) do state.tracks[true] = {} end
+end
+
+--- Set the computer block position by hand (ground only, replaces GPS).
+-- nil returns to GPS.
+function radar.setHost(x, y, z)
+    if x == nil then
+        host.ground = nil
+        return
+    end
+    checkNumbers("setHost", x, y, z)
+    host.ground = { x, y, z }
+end
+
+--- World position of the centre of the block at (dx, dy, dz) from the computer
+-- block (structure axes on a Sable structure, world axes on the ground).
+-- Returns {x, y, z}, the structure orientation {x, y, z, w} (nil on the
+-- ground) and the mode ("structure" or "ground").
+function radar.blockToWorld(dx, dy, dz)
+    checkNumbers("blockToWorld", dx, dy, dz)
+    if onStructure() then
+        if not host.structure or host.structure.uuid ~= sublevel.getUniqueId() then
+            calibrateStructure()
+        end
+        local b = host.structure.block
+        local pose = readPose()
+        local p = toWorld(pose, { b[1] + dx + 0.5, b[2] + dy + 0.5, b[3] + dz + 0.5 })
+        local q = pose.q
+        return { x = p[1], y = p[2], z = p[3] }, { x = q[1], y = q[2], z = q[3], w = q[4] }, "structure"
+    end
+    if not host.ground then calibrateGround() end
+    local b = host.ground
+    return { x = b[1] + dx + 0.5, y = b[2] + dy + 0.5, z = b[3] + dz + 0.5 }, nil, "ground"
 end
 
 --- Drop all tracked targets of a sensor (velocity starts from scratch).
