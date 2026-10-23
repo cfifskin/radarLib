@@ -1,4 +1,5 @@
 -- Example: aim a big cannon at the nearest structure seen by the radar.
+package.path = "/lib/?.lua;" .. package.path -- works even if the startup loader is missing or old
 local radar = require("radar")
 local ballistics = require("ballistics")
 

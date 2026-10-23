@@ -95,11 +95,12 @@ end
 
 -- Largest text scale that keeps at least minWidth x minHeight characters, so
 -- the picture looks the same on a 3x2 monitor and on a 6x4 one.
-local function chooseScale(device)
+local function chooseScale(device, fixed)
     if type(device.setTextScale) ~= "function" then return end
     local cfg = ui.config
-    if cfg.textScale then
-        device.setTextScale(cfg.textScale)
+    fixed = fixed or cfg.textScale
+    if fixed then
+        device.setTextScale(fixed)
         return
     end
     for s = 5, 0.5, -0.5 do
@@ -122,15 +123,16 @@ end
 -- character holds 2x3 square pixels. The canvas covers the radar zone only.
 local function buildLayout(state, showInfo)
     local device = state.device
-    if not state.scaled then
-        chooseScale(device)
-        state.scaled = true
+    if state.scaled ~= (state.textScale or "auto") then
+        chooseScale(device, state.textScale)
+        state.scaled = state.textScale or "auto"
+        state.layout = nil
     end
     local w, h = device.getSize()
     local key = ("%dx%d%s"):format(w, h, showInfo and "i" or "")
     if state.layout and state.layout.key == key then return state.layout end
     if state.layout and type(device.setTextScale) == "function" then
-        chooseScale(device) -- the monitor was resized
+        chooseScale(device, state.textScale) -- the monitor was resized
         w, h = device.getSize()
         key = ("%dx%d%s"):format(w, h, showInfo and "i" or "")
     end
@@ -437,9 +439,17 @@ end
 --                  structure these are the structure's own axes
 -- @param showInfo  true = info panel on the right
 -- @param touch     true = touching a target on an advanced monitor selects it
+-- @param textScale monitor text scale 0.5..5 in steps of 0.5; nil = pick by
+--                  monitor size (ignored by terminals without setTextScale)
 -- @return the selected target from targets, or nil
-function ui.draw(device, targets, info, front, showInfo, touch)
+function ui.draw(device, targets, info, front, showInfo, touch, textScale)
     local state = resolve(device)
+    if textScale ~= nil then
+        if type(textScale) ~= "number" or textScale < 0.5 or textScale > 5 or (textScale * 2) % 1 ~= 0 then
+            error("radarui: bad argument #7 (text scale 0.5..5 in steps of 0.5, or nil)", 2)
+        end
+    end
+    state.textScale = textScale
     if type(targets) ~= "table" then
         error("radarui: bad argument #2 (targets table expected, got " .. type(targets) .. ")", 2)
     end
@@ -500,7 +510,7 @@ function ui.handleEvent(event, a, b, c)
         for _, s in pairs(states) do
             if s.name == a and s.last then
                 s.layout = nil
-                chooseScale(s.device)
+                chooseScale(s.device, s.textScale)
                 paint(s)
             end
         end

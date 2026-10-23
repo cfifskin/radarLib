@@ -4,7 +4,10 @@
 -- installer floppy:
 --   wget run https://raw.githubusercontent.com/cfifskin/radarLib/main/radar_disk/get.lua disk
 local BASE = "https://raw.githubusercontent.com/cfifskin/radarLib/main/radar_disk/"
-local FILES = { "radar.lua", "install.lua", "loader.lua", "startup.lua", "example.lua" }
+local FILES = {
+    "radar.lua", "radarui.lua", "ballistics.lua", "install.lua", "uninstall.lua", "loader.lua", "startup.lua",
+    "example.lua", "example_ui.lua", "example_gun.lua",
+}
 
 local args = { ... }
 local keep = args[1]
