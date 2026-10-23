@@ -10,7 +10,21 @@
 | `loader.lua` | Ставится как `/startup/00_radarlib.lua` и делает `require("radar")` доступным из любой папки |
 | `example.lua` | Пример. Копируется в `/radar_example.lua`, если такого файла ещё нет |
 
-## Установка
+## Установка одной командой (нужен HTTP в CC)
+
+```
+wget run https://raw.githubusercontent.com/cfifskin/radarLib/main/radar_disk/get.lua
+```
+
+Команда скачивает файлы из репозитория во временную папку, устанавливает библиотеку и удаляет временные файлы. Перезагрузка не нужна.
+
+Сделать установочную дискету (файлы останутся на ней):
+
+```
+wget run https://raw.githubusercontent.com/cfifskin/radarLib/main/radar_disk/get.lua disk
+```
+
+## Установка с дискеты
 
 1. Скопируйте файлы этой папки на дискету: в мире это `saves/<мир>/computercraft/disk/<id>/`, где `<id>` выдаёт команда `id` при вставленной дискете.
 2. Вставьте дискету в дисковод рядом с компьютером.
