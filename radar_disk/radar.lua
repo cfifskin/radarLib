@@ -12,7 +12,7 @@ position therefore has no lag. Velocity is a least-squares fit over the
 positions of the last config.velocityWindow ticks.
 ]]
 
-local radar = { version = "1.5.0" }
+local radar = { version = "1.6.0" }
 
 radar.config = {
     decimals = 2,         -- rounding of x/y/z and distance (2 = 0.01 block)
@@ -22,6 +22,7 @@ radar.config = {
     maxGapTicks = 60,     -- forget a target that was not seen for this many ticks
     gpsTimeout = 2,       -- seconds to wait for gps.locate
     structureCheck = 2,   -- seconds between checks whether the computer is on a structure
+    serverFilter = true,  -- with the CC Optical Filters addon: filter inside the sensor
 }
 
 -- Per-sensor state, keyed by peripheral name.
@@ -290,6 +291,29 @@ local function updateTrack(tracks, id, point, exact)
     return track
 end
 
+-- CC Optical Filters addon: makes setFilter work on every sensor and adds
+-- getScanStats. Detected by its methods on the peripheral.
+local function hasAddon(sensor)
+    return type(sensor.getScanStats) == "function" and type(sensor.setFilter) == "function"
+end
+
+-- Puts the wanted filter on the sensor itself (the mod then skips other
+-- entities before its target limit). The filter lives in the sensor block and
+-- is shared by every program using it, so it is checked on every call
+-- (getFilter is instant) and only rewritten when it differs (setFilter costs
+-- a tick).
+local function syncServerFilter(sensor, types)
+    local want = {}
+    if types then
+        for t in pairs(types) do want[#want + 1] = t end
+        table.sort(want)
+    end
+    local have = sensor.getFilter()
+    table.sort(have)
+    if table.concat(have, "\0") == table.concat(want, "\0") then return end
+    if #want == 0 then sensor.clearFilter() else sensor.setFilter(want) end
+end
+
 --- Scan with a sensor.
 -- @param sensor  wrapped entity_sensor peripheral or its name
 -- @param filter  type name, list of type names, or nil for all targets
@@ -306,8 +330,13 @@ function radar.scan(sensor, filter, global)
 
     local state = getState(name)
     if state.exact == nil then state.exact = sensor.isOptical() end
+    if state.addon == nil then state.addon = hasAddon(sensor) end
 
     local cfg = radar.config
+    -- With the addon the sensor filters by itself; its rules also accept
+    -- entity ids ("minecraft:pig"), short ids ("pig") and size classes.
+    local serverFilter = state.addon and cfg.serverFilter
+    if serverFilter then syncServerFilter(sensor, types) end
     local count = state.exact and 1 or math.max(1, math.floor(cfg.scans))
     if global then ensureHost(state) end -- GPS calibration before the timed scans
     local structure = onStructure()
@@ -362,7 +391,8 @@ function radar.scan(sensor, filter, global)
         -- does not break velocity estimation.
         local track = updateTrack(tracks, id, { g.tick, p[1], p[2], p[3], n }, state.exact)
 
-        if not types or types[string.lower(d.type)] then
+        local kind = string.lower(d.type)
+        if not types or serverFilter or types[kind] or types[kind:gsub("^.*:", "")] then
             local target = {}
             for k, v in pairs(d) do target[k] = v end
             -- One identifier: for a structure ccoptical repeats its UUID in id and
@@ -390,6 +420,14 @@ function radar.scan(sensor, filter, global)
         if tick - t.tick > cfg.maxGapTicks then tracks[id] = nil end
     end
 
+    -- Addon statistics of the last scan: did the mod's target limit cut
+    -- anything off? (instant call, no tick)
+    local stats
+    if state.addon then
+        local ok, s = pcall(sensor.getScanStats)
+        if ok and type(s) == "table" then stats = s end
+    end
+
     return targets, {
         sensor = name,
         tick = tick,
@@ -400,6 +438,11 @@ function radar.scan(sensor, filter, global)
         origin = origin and { x = origin[1], y = origin[2], z = origin[3] } or nil,
         range = sensor.getRange and sensor.getRange() or nil,
         orientation = orientation,
+        addon = state.addon,
+        filter = types and (serverFilter and "server" or "local") or nil,
+        matched = stats and stats.matched or nil,
+        maxTargets = stats and stats.maxTargets or nil,
+        truncated = stats and stats.truncated or nil,
     }
 end
 

@@ -19,7 +19,7 @@ target. Select a target with ui.select(device, uuid) or, on an advanced monitor,
 by touching it (needs ui.listen() running, see the README).
 ]]
 
-local ui = { version = "1.0.0" }
+local ui = { version = "1.1.0" }
 
 ui.config = {
     textScale = nil,     -- fixed monitor text scale; nil = pick by monitor size
@@ -239,6 +239,10 @@ local function panelLines(state, L, targets, info, front, range, selected)
     add("RADAR", c.title)
     add(("Range %.0f"):format(range), c.label)
     add(("Targets %d"):format(#targets), c.label)
+    if info.truncated then
+        -- the sensor's target limit cut off the farthest matches
+        add(("Limit %d of %d"):format(info.maxTargets or 0, info.matched or 0), c.warning)
+    end
     add(("Up %s%s"):format(front:sub(1, 1) == "-" and "" or "+", front:upper()), c.label)
     add(("-"):rep(width), c.grid)
 
