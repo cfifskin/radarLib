@@ -19,7 +19,7 @@ target. Select a target with ui.select(device, uuid) or, on an advanced monitor,
 by touching it (needs ui.listen() running, see the README).
 ]]
 
-local ui = { version = "1.1.0" }
+local ui = { version = "1.1.1" }
 
 ui.config = {
     textScale = nil,     -- fixed monitor text scale; nil = pick by monitor size
@@ -95,18 +95,40 @@ end
 
 -- Largest text scale that keeps at least minWidth x minHeight characters, so
 -- the picture looks the same on a 3x2 monitor and on a 6x4 one.
+-- Every scale change clears the monitor and queues a monitor_resize event, so
+-- the search starts from the current scale and touches it as little as
+-- possible.
 local function chooseScale(device, fixed)
     if type(device.setTextScale) ~= "function" then return end
     local cfg = ui.config
+    local hasGet = type(device.getTextScale) == "function"
+    local function set(s)
+        if not (hasGet and device.getTextScale() == s) then device.setTextScale(s) end
+    end
     fixed = fixed or cfg.textScale
     if fixed then
-        device.setTextScale(fixed)
+        set(fixed)
         return
     end
-    for s = 5, 0.5, -0.5 do
-        device.setTextScale(s)
+    local function fits()
         local w, h = device.getSize()
-        if w >= cfg.minWidth and h >= cfg.minHeight then return end
+        return w >= cfg.minWidth and h >= cfg.minHeight
+    end
+    local s = hasGet and device.getTextScale() or 5
+    s = math.max(0.5, math.min(5, math.floor(s * 2 + 0.5) / 2))
+    set(s)
+    if fits() then
+        -- go up while the next scale still fits
+        while s < 5 do
+            set(s + 0.5)
+            if not fits() then set(s) return end
+            s = s + 0.5
+        end
+    else
+        while s > 0.5 and not fits() do
+            s = s - 0.5
+            set(s)
+        end
     end
 end
 
@@ -123,19 +145,20 @@ end
 -- character holds 2x3 square pixels. The canvas covers the radar zone only.
 local function buildLayout(state, showInfo)
     local device = state.device
-    if state.scaled ~= (state.textScale or "auto") then
-        chooseScale(device, state.textScale)
-        state.scaled = state.textScale or "auto"
-        state.layout = nil
-    end
     local w, h = device.getSize()
-    local key = ("%dx%d%s"):format(w, h, showInfo and "i" or "")
-    if state.layout and state.layout.key == key then return state.layout end
-    if state.layout and type(device.setTextScale) == "function" then
-        chooseScale(device, state.textScale) -- the monitor was resized
+    -- Pick the text scale on the first draw, when the wanted scale changes and
+    -- when the monitor itself was resized (its size no longer matches the
+    -- layout). Our own scale changes leave the size equal to the layout, so
+    -- they do not trigger another search.
+    local scaleKey = state.textScale or ui.config.textScale or "auto"
+    local L0 = state.layout
+    if state.scaled ~= scaleKey or (L0 and (L0.W ~= w or L0.H ~= h)) then
+        chooseScale(device, state.textScale)
+        state.scaled = scaleKey
         w, h = device.getSize()
-        key = ("%dx%d%s"):format(w, h, showInfo and "i" or "")
     end
+    local key = ("%dx%d%s"):format(w, h, showInfo and "i" or "")
+    if L0 and L0.key == key then return L0 end
 
     local L = { key = key, W = w, H = h, PH = h * 3 }
     local rw = w
@@ -511,12 +534,11 @@ end
 -- and monitor_resize. Returns true if a selection changed.
 function ui.handleEvent(event, a, b, c)
     if event == "monitor_resize" then
+        -- A resize clears the monitor: repaint. paint() rescales only if the
+        -- size really changed, so our own setTextScale calls (which queue
+        -- this event too) do not start an endless resize loop.
         for _, s in pairs(states) do
-            if s.name == a and s.last then
-                s.layout = nil
-                chooseScale(s.device, s.textScale)
-                paint(s)
-            end
+            if s.name == a and s.last then paint(s) end
         end
         return false
     end
