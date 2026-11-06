@@ -19,7 +19,7 @@ target. Select a target with ui.select(device, uuid) or, on an advanced monitor,
 by touching it (needs ui.listen() running, see the README).
 ]]
 
-local ui = { version = "1.2.4" }
+local ui = { version = "1.2.5" }
 
 ui.config = {
     textScale = nil,     -- fixed monitor text scale; nil = pick by monitor size
@@ -158,86 +158,56 @@ end
 -- be lit, its background must stay transparent and text cannot be transparent.
 local function drawable(x, y) return x % 2 == 0 or y % 3 ~= 2 end
 
--- Circle for a see-through background. Going from one of the four outermost
--- points to the diagonal, a line that never turns back has no zigzags, and one
--- that moves by one pixel at a time has no gaps. Of all such lines over pixels
--- that can be lit, this picks the closest to the true circle.
+-- Circle for a see-through background. One quarter is the line from the top to
+-- the right side that is closest to the true circle among those that use only
+-- pixels that can be lit: moving right and down only, it has no zigzags, and
+-- every step goes to a touching pixel, so it has no gaps. The other quarters are
+-- its mirror images, which land on pixels that can be lit too: the centre is on
+-- an even column and between rows 0 and 1 of a character.
 local function traceRing(pix, L, r, color)
-    local cx, cy = L.cx - 0.5, L.cy - 0.5 -- centre, in pixels
+    local cx, cy = L.cx - 0.5, L.cy -- centre, in pixels
+    local left, right = cx, math.ceil(cx + r) + 1
+    local top, bottom = math.floor(cy - r) - 1, math.floor(cy)
 
-    -- One eighth of the circle. flat = walks along x, signA = walking direction,
-    -- signB = side of the centre. Returns the last pixel.
-    local function octant(flat, signA, signB)
-        local a0, b0 = flat and cx or cy, flat and cy or cx
-        local inward = -signB
-        local function fits(a, b)
-            if flat then return drawable(a, b) end
-            return drawable(b, a)
-        end
-        local function miss(a, b)
-            local d = math.sqrt((a - a0) ^ 2 + (b - b0) ^ 2) - r
-            return d * d
-        end
+    local function closeness(x, y)
+        if not drawable(x, y) then return nil end
+        local miss = math.sqrt((x - cx) ^ 2 + (y - cy) ^ 2) - r
+        if math.abs(miss) > 1.5 then return nil end
+        return miss * miss + 0.01 -- the small part prefers fewer pixels
+    end
 
-        local layers, u = {}, 0
-        while u <= math.sqrt(math.max(0, r * r - u * u)) do
-            local a = a0 + signA * u
-            local want = math.floor(b0 + signB * math.sqrt(r * r - u * u) + 0.5)
-            local layer, previous = {}, layers[u - 1]
-            for b = want - 2, want + 2 do
-                if fits(a, b) then
-                    if not previous then
-                        layer[b] = { cost = miss(a, b) }
-                    else
-                        local stay, step = previous[b], previous[b - inward]
-                        local from = stay
-                        if step and (not stay or step.cost < stay.cost) then from = step end
-                        if from then
-                            layer[b] = { cost = from.cost + miss(a, b), from = from == stay and b or b - inward }
-                        end
+    local best = {}
+    for y = top, bottom do
+        local row = {}
+        best[y] = row
+        for x = left, right do
+            local cost = closeness(x, y)
+            if cost then
+                local node
+                if x == left and y % 3 ~= 2 then node = { cost = cost } end
+                for _, p in ipairs({ { x - 1, y }, { x, y - 1 }, { x - 1, y - 1 } }) do
+                    local from = best[p[2]] and best[p[2]][p[1]]
+                    if from and (not node or from.cost + cost < node.cost) then
+                        node = { cost = from.cost + cost, x = p[1], y = p[2] }
                     end
                 end
+                row[x] = node
             end
-            layers[u] = layer
-            u = u + 1
-        end
-
-        local last, best = u - 1, nil
-        for b, node in pairs(layers[last]) do
-            if not best or node.cost < layers[last][best].cost then best = b end
-        end
-        local endA, endB = a0 + signA * last, best
-        for i = last, 0, -1 do
-            local a = a0 + signA * i
-            if flat then setPixel(pix, L, a, best, color) else setPixel(pix, L, best, a, color) end
-            best = layers[i][best].from
-        end
-        if flat then return endA, endB end
-        return endB, endA
-    end
-
-    -- The two walks meet near the diagonal.
-    local function join(x, y, tx, ty)
-        for _ = 1, 8 do
-            if math.max(math.abs(tx - x), math.abs(ty - y)) <= 1 then return end
-            local sx, sy = tx > x and 1 or tx < x and -1 or 0, ty > y and 1 or ty < y and -1 or 0
-            local moves = { { sx, sy }, { sx, 0 }, { 0, sy }, { sx, -1 }, { sx, 1 }, { -1, sy }, { 1, sy } }
-            for _, m in ipairs(moves) do
-                if (m[1] ~= 0 or m[2] ~= 0) and drawable(x + m[1], y + m[2]) then
-                    x, y = x + m[1], y + m[2]
-                    break
-                end
-            end
-            setPixel(pix, L, x, y, color)
         end
     end
 
-    for _, signX in ipairs({ 1, -1 }) do
-        for _, signY in ipairs({ 1, -1 }) do
-            local x1, y1 = octant(true, signX, signY)
-            local x2, y2 = octant(false, signY, signX)
-            join(x1, y1, x2, y2)
-        end
+    local endX
+    for x, node in pairs(best[bottom]) do
+        if x % 2 == 0 and (not endX or node.cost < best[bottom][endX].cost) then endX = x end
+    end
+    local x, y = endX, bottom
+    while x do
+        setPixel(pix, L, x, y, color)
+        setPixel(pix, L, 2 * cx - x, y, color)
+        setPixel(pix, L, x, 2 * cy - y, color)
+        setPixel(pix, L, 2 * cx - x, 2 * cy - y, color)
+        local node = best[y][x]
+        x, y = node.x, node.y
     end
 end
 
@@ -271,9 +241,9 @@ local function buildLayout(state, showInfo)
     L.cx = math.floor((L.ZW - 1) / 2) + 0.5
     L.cy = math.floor((L.PH - 1) / 2) + 0.5
     local see = device.transparent
-    if see then -- the cross goes along a column and a row that are complete
+    if see then -- the cross goes along a complete column and row, the rings mirror
         if math.floor(L.cx) % 2 == 1 then L.cx = L.cx - 1 end
-        if math.floor(L.cy) % 3 == 2 then L.cy = L.cy - 1 end
+        L.cy = L.cy - math.floor(L.cy) % 3
     end
     L.R = math.min(L.cx, L.cy, L.ZW - L.cx, L.PH - L.cy)
 
