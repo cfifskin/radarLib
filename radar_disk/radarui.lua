@@ -19,7 +19,7 @@ target. Select a target with ui.select(device, uuid) or, on an advanced monitor,
 by touching it (needs ui.listen() running, see the README).
 ]]
 
-local ui = { version = "1.2.3" }
+local ui = { version = "1.2.4" }
 
 ui.config = {
     textScale = nil,     -- fixed monitor text scale; nil = pick by monitor size
@@ -158,80 +158,85 @@ end
 -- be lit, its background must stay transparent and text cannot be transparent.
 local function drawable(x, y) return x % 2 == 0 or y % 3 ~= 2 end
 
--- See-through background: the rings are the same pixels as on a monitor, without
--- those that cannot be lit. Where that would break a line, the neighbour closest
--- to the circle takes over, so the rings stay as round as on a monitor.
-local function repairRings(pix, L, R, bg, ring)
-    local function at(x, y)
-        if x < 0 or y < 0 or x >= L.ZW or y >= L.PH then return nil end
-        return pix[y * L.ZW + x + 1]
-    end
-    local OFFSETS = {
-        { -1, -1 }, { 0, -1 }, { 1, -1 }, { 1, 0 }, { 1, 1 }, { 0, 1 }, { -1, 1 }, { -1, 0 },
-    }
-    -- Are the lit neighbours of a pixel still one piece without it?
-    local function holdsTogether(x, y)
-        local lit, first = {}, nil
-        for i, o in ipairs(OFFSETS) do
-            local v = at(x + o[1], y + o[2])
-            if v and v ~= bg then
-                lit[i] = true
-                first = first or i
-            end
-        end
-        if not first then return true end
-        local seen, stack = { [first] = true }, { first }
-        while #stack > 0 do
-            local i = table.remove(stack)
-            local a = OFFSETS[i]
-            for j, b in ipairs(OFFSETS) do
-                if lit[j] and not seen[j] and math.max(math.abs(a[1] - b[1]), math.abs(a[2] - b[2])) <= 1 then
-                    seen[j] = true
-                    stack[#stack + 1] = j
-                end
-            end
-        end
-        for i in pairs(lit) do
-            if not seen[i] then return false end
-        end
-        return true
-    end
+-- Circle for a see-through background. Going from one of the four outermost
+-- points to the diagonal, a line that never turns back has no zigzags, and one
+-- that moves by one pixel at a time has no gaps. Of all such lines over pixels
+-- that can be lit, this picks the closest to the true circle.
+local function traceRing(pix, L, r, color)
+    local cx, cy = L.cx - 0.5, L.cy - 0.5 -- centre, in pixels
 
-    for y = 2, L.PH - 1, 3 do
-        for x = 1, L.ZW - 1, 2 do
-            local color = at(x, y)
-            if color and color ~= bg then
-                pix[y * L.ZW + x + 1] = bg
-                local radius = color == ring and R - 0.5 or R / 2
-                -- One pixel is enough around a straight piece, a diagonal needs two.
-                for _ = 1, 2 do
-                    if holdsTogether(x, y) then break end
-                    local best, bestScore
-                    for _, o in ipairs(OFFSETS) do
-                        local nx, ny = x + o[1], y + o[2]
-                        if at(nx, ny) == bg and drawable(nx, ny) then
-                            local d = math.sqrt((nx + 0.5 - L.cx) ^ 2 + (ny + 0.5 - L.cy) ^ 2)
-                            local index_ = ny * L.ZW + nx + 1
-                            pix[index_] = color
-                            local score = math.abs(d - radius) + (holdsTogether(x, y) and 0 or 10)
-                            pix[index_] = bg
-                            if not best or score < bestScore then best, bestScore = index_, score end
+    -- One eighth of the circle. flat = walks along x, signA = walking direction,
+    -- signB = side of the centre. Returns the last pixel.
+    local function octant(flat, signA, signB)
+        local a0, b0 = flat and cx or cy, flat and cy or cx
+        local inward = -signB
+        local function fits(a, b)
+            if flat then return drawable(a, b) end
+            return drawable(b, a)
+        end
+        local function miss(a, b)
+            local d = math.sqrt((a - a0) ^ 2 + (b - b0) ^ 2) - r
+            return d * d
+        end
+
+        local layers, u = {}, 0
+        while u <= math.sqrt(math.max(0, r * r - u * u)) do
+            local a = a0 + signA * u
+            local want = math.floor(b0 + signB * math.sqrt(r * r - u * u) + 0.5)
+            local layer, previous = {}, layers[u - 1]
+            for b = want - 2, want + 2 do
+                if fits(a, b) then
+                    if not previous then
+                        layer[b] = { cost = miss(a, b) }
+                    else
+                        local stay, step = previous[b], previous[b - inward]
+                        local from = stay
+                        if step and (not stay or step.cost < stay.cost) then from = step end
+                        if from then
+                            layer[b] = { cost = from.cost + miss(a, b), from = from == stay and b or b - inward }
                         end
                     end
-                    if best then pix[best] = color end
                 end
             end
+            layers[u] = layer
+            u = u + 1
+        end
+
+        local last, best = u - 1, nil
+        for b, node in pairs(layers[last]) do
+            if not best or node.cost < layers[last][best].cost then best = b end
+        end
+        local endA, endB = a0 + signA * last, best
+        for i = last, 0, -1 do
+            local a = a0 + signA * i
+            if flat then setPixel(pix, L, a, best, color) else setPixel(pix, L, best, a, color) end
+            best = layers[i][best].from
+        end
+        if flat then return endA, endB end
+        return endB, endA
+    end
+
+    -- The two walks meet near the diagonal.
+    local function join(x, y, tx, ty)
+        for _ = 1, 8 do
+            if math.max(math.abs(tx - x), math.abs(ty - y)) <= 1 then return end
+            local sx, sy = tx > x and 1 or tx < x and -1 or 0, ty > y and 1 or ty < y and -1 or 0
+            local moves = { { sx, sy }, { sx, 0 }, { 0, sy }, { sx, -1 }, { sx, 1 }, { -1, sy }, { 1, sy } }
+            for _, m in ipairs(moves) do
+                if (m[1] ~= 0 or m[2] ~= 0) and drawable(x + m[1], y + m[2]) then
+                    x, y = x + m[1], y + m[2]
+                    break
+                end
+            end
+            setPixel(pix, L, x, y, color)
         end
     end
 
-    -- A row that lost every second pixel leaves teeth along the line next to it.
-    for y = 2, L.PH - 1, 3 do
-        for x = 0, L.ZW - 1, 2 do
-            local color = at(x, y)
-            if color and color ~= bg and at(x - 1, y) ~= color and at(x + 1, y) ~= color
-                and (at(x, y - 1) == color or at(x, y + 1) == color) and holdsTogether(x, y) then
-                pix[y * L.ZW + x + 1] = bg
-            end
+    for _, signX in ipairs({ 1, -1 }) do
+        for _, signY in ipairs({ 1, -1 }) do
+            local x1, y1 = octant(true, signX, signY)
+            local x2, y2 = octant(false, signY, signX)
+            join(x1, y1, x2, y2)
         end
     end
 end
@@ -283,17 +288,22 @@ local function buildLayout(state, showInfo)
             local d = math.sqrt(dx * dx + dy * dy)
             local col = bg
             if d <= R then
-                if d > R - 1 then
+                if not see and d > R - 1 then
                     col = ring
-                elseif math.abs(d - R / 2) <= 0.5 or dx == 0 or dy == 0 then
+                elseif not see and math.abs(d - R / 2) <= 0.5 then
                     col = grid
+                elseif (dx == 0 or dy == 0) and (not see or d <= R - 1) then
+                    col = grid -- on a HUD the cross ends at the ring, not past it
                 end
             end
             pix[py * L.ZW + px + 1] = col
         end
     end
-    if see then repairRings(pix, L, R, bg, ring) end
-    local top = math.floor(L.cy - R)
+    if see then
+        traceRing(pix, L, R / 2, grid)
+        traceRing(pix, L, R - 0.5, ring)
+    end
+    local top = math.floor(L.cy - R) + (see and 1 or 0)
     for py = top, top + 2 do setPixel(pix, L, math.floor(L.cx), py, index(c.front)) end
     setPixel(pix, L, math.floor(L.cx), math.floor(L.cy), index(c.center))
     L.base = pix
