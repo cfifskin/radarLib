@@ -19,7 +19,7 @@ target. Select a target with ui.select(device, uuid) or, on an advanced monitor,
 by touching it (needs ui.listen() running, see the README).
 ]]
 
-local ui = { version = "1.2.1" }
+local ui = { version = "1.2.2" }
 
 ui.config = {
     textScale = nil,     -- fixed monitor text scale; nil = pick by monitor size
@@ -158,37 +158,63 @@ end
 -- be lit, its background must stay transparent and text cannot be transparent.
 local function drawable(x, y) return x % 2 == 0 or y % 3 ~= 2 end
 
--- Circle for a see-through background. Thin lines must not run over pixels that
--- cannot be lit: the steep parts keep to columns and the flat parts to rows that
--- are complete, with the steps between them filled, so the line stays unbroken.
+-- Circle for a see-through background. Thin lines must not touch pixels that
+-- cannot be lit, so the circle is walked from each of its four outermost points
+-- towards the diagonals, pixel by pixel. The line moves by one pixel at a time
+-- and takes a step early or late to get around such a pixel.
 local function traceRing(pix, L, r, color)
-    local steps = math.ceil(r * 12)
-    local lastX, lastY
-    for i = 0, steps do
-        local angle = 2 * math.pi * i / steps
-        local dx, dy = r * math.cos(angle), r * math.sin(angle)
-        local fx, fy = L.cx - 0.5 + dx, L.cy - 0.5 + dy
-        local x, y = math.floor(fx + 0.5), math.floor(fy + 0.5)
-        if math.abs(dy) > math.abs(dx) then
-            if y % 3 == 2 then y = fy >= y and y + 1 or y - 1 end
-        elseif x % 2 == 1 then
-            x = fx >= x and x + 1 or x - 1
+    local cx, cy = L.cx - 0.5, L.cy - 0.5 -- centre, in pixels
+
+    -- One eighth of the circle. flat = walks along x, signA = walking direction,
+    -- signB = side of the centre. Returns the last pixel.
+    local function walk(flat, signA, signB)
+        local a0, b0 = flat and cx or cy, flat and cy or cx
+        local inward = -signB
+        local function fits(a, b)
+            if flat then return drawable(a, b) end
+            return drawable(b, a)
         end
-        if lastX and (math.abs(x - lastX) > 1 or math.abs(y - lastY) > 1) then
-            -- the pixel between them, or its neighbour if it cannot be lit
-            local mx, my = math.floor((x + lastX) / 2), math.floor((y + lastY) / 2)
-            local done = false
-            for _, oy in ipairs({ 0, 1, -1 }) do
-                for _, ox in ipairs({ 0, 1, -1 }) do
-                    if not done and drawable(mx + ox, my + oy) then
-                        setPixel(pix, L, mx + ox, my + oy, color)
-                        done = true
-                    end
+        local b = math.floor(b0 + signB * r + 0.5)
+        if not fits(a0, b) then b = b + inward end
+        local a = a0
+        local u = 0
+        while true do
+            local v = math.sqrt(math.max(0, r * r - u * u))
+            if u > v then break end
+            a = a0 + signA * u
+            local want = math.floor(b0 + signB * v + 0.5)
+            local nextB = (want - b) * inward > 0 and b + inward or b
+            if not fits(a, nextB) then nextB = nextB == b and b + inward or b end
+            b = nextB
+            if flat then setPixel(pix, L, a, b, color) else setPixel(pix, L, b, a, color) end
+            u = u + 1
+        end
+        if flat then return a, b end
+        return b, a
+    end
+
+    -- The two walks meet near the diagonal.
+    local function join(x, y, tx, ty)
+        for _ = 1, 8 do
+            if math.max(math.abs(tx - x), math.abs(ty - y)) <= 1 then return end
+            local sx, sy = tx > x and 1 or tx < x and -1 or 0, ty > y and 1 or ty < y and -1 or 0
+            local moves = { { sx, sy }, { sx, 0 }, { 0, sy }, { sx, -1 }, { sx, 1 }, { -1, sy }, { 1, sy } }
+            for _, m in ipairs(moves) do
+                if (m[1] ~= 0 or m[2] ~= 0) and drawable(x + m[1], y + m[2]) then
+                    x, y = x + m[1], y + m[2]
+                    break
                 end
             end
+            setPixel(pix, L, x, y, color)
         end
-        setPixel(pix, L, x, y, color)
-        lastX, lastY = x, y
+    end
+
+    for _, signX in ipairs({ 1, -1 }) do
+        for _, signY in ipairs({ 1, -1 }) do
+            local x1, y1 = walk(true, signX, signY)
+            local x2, y2 = walk(false, signY, signX)
+            join(x1, y1, x2, y2)
+        end
     end
 end
 
