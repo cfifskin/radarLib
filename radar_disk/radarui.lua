@@ -19,7 +19,7 @@ target. Select a target with ui.select(device, uuid) or, on an advanced monitor,
 by touching it (needs ui.listen() running, see the README).
 ]]
 
-local ui = { version = "1.2.0" }
+local ui = { version = "1.2.1" }
 
 ui.config = {
     textScale = nil,     -- fixed monitor text scale; nil = pick by monitor size
@@ -154,6 +154,44 @@ local function inCircle(L, x, y, margin)
     return dx * dx + dy * dy <= r * r
 end
 
+-- See-through background (HUD): the bottom-right pixel of a character can never
+-- be lit, its background must stay transparent and text cannot be transparent.
+local function drawable(x, y) return x % 2 == 0 or y % 3 ~= 2 end
+
+-- Circle for a see-through background. Thin lines must not run over pixels that
+-- cannot be lit: the steep parts keep to columns and the flat parts to rows that
+-- are complete, with the steps between them filled, so the line stays unbroken.
+local function traceRing(pix, L, r, color)
+    local steps = math.ceil(r * 12)
+    local lastX, lastY
+    for i = 0, steps do
+        local angle = 2 * math.pi * i / steps
+        local dx, dy = r * math.cos(angle), r * math.sin(angle)
+        local fx, fy = L.cx - 0.5 + dx, L.cy - 0.5 + dy
+        local x, y = math.floor(fx + 0.5), math.floor(fy + 0.5)
+        if math.abs(dy) > math.abs(dx) then
+            if y % 3 == 2 then y = fy >= y and y + 1 or y - 1 end
+        elseif x % 2 == 1 then
+            x = fx >= x and x + 1 or x - 1
+        end
+        if lastX and (math.abs(x - lastX) > 1 or math.abs(y - lastY) > 1) then
+            -- the pixel between them, or its neighbour if it cannot be lit
+            local mx, my = math.floor((x + lastX) / 2), math.floor((y + lastY) / 2)
+            local done = false
+            for _, oy in ipairs({ 0, 1, -1 }) do
+                for _, ox in ipairs({ 0, 1, -1 }) do
+                    if not done and drawable(mx + ox, my + oy) then
+                        setPixel(pix, L, mx + ox, my + oy, color)
+                        done = true
+                    end
+                end
+            end
+        end
+        setPixel(pix, L, x, y, color)
+        lastX, lastY = x, y
+    end
+end
+
 -- The radar is drawn on a pixel canvas with teletext characters: every
 -- character holds 2x3 square pixels. The canvas covers the radar zone only.
 local function buildLayout(state, showInfo)
@@ -183,6 +221,11 @@ local function buildLayout(state, showInfo)
     if showInfo then L.infoW = w - rw - 1 end
     L.cx = math.floor((L.ZW - 1) / 2) + 0.5
     L.cy = math.floor((L.PH - 1) / 2) + 0.5
+    local see = device.transparent
+    if see then -- the cross goes along a column and a row that are complete
+        if math.floor(L.cx) % 2 == 1 then L.cx = L.cx - 1 end
+        if math.floor(L.cy) % 3 == 2 then L.cy = L.cy - 1 end
+    end
     L.R = math.min(L.cx, L.cy, L.ZW - L.cx, L.PH - L.cy)
 
     -- Static background: range circle, half-range ring, cross, front mark.
@@ -196,14 +239,18 @@ local function buildLayout(state, showInfo)
             local d = math.sqrt(dx * dx + dy * dy)
             local col = bg
             if d <= R then
-                if d > R - 1 then
+                if not see and d > R - 1 then
                     col = ring
-                elseif math.abs(d - R / 2) <= 0.5 or dx == 0 or dy == 0 then
+                elseif (not see and math.abs(d - R / 2) <= 0.5) or dx == 0 or dy == 0 then
                     col = grid
                 end
             end
             pix[py * L.ZW + px + 1] = col
         end
+    end
+    if see then
+        traceRing(pix, L, R / 2, grid)
+        traceRing(pix, L, R - 0.5, ring)
     end
     local top = math.floor(L.cy - R)
     for py = top, top + 2 do setPixel(pix, L, math.floor(L.cx), py, index(c.front)) end
@@ -453,6 +500,7 @@ local function paint(state)
         local d, max = math.sqrt(ddx * ddx + ddy * ddy), L.R - 1.5
         if d > max then px, py = L.cx + ddx * max / d, L.cy + ddy * max / d end
         local x0, y0 = math.floor(px - 0.5), math.floor(py - 0.5)
+        if state.device.transparent then x0, y0 = x0 - x0 % 2, y0 - y0 % 3 end -- whole 2x2 in a cell
         local col = index(targetColor(t))
         for yy = y0, y0 + 1 do
             for xx = x0, x0 + 1 do setPixel(pix, L, xx, yy, col) end
