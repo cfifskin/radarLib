@@ -19,7 +19,7 @@ target. Select a target with ui.select(device, uuid) or, on an advanced monitor,
 by touching it (needs ui.listen() running, see the README).
 ]]
 
-local ui = { version = "1.2.5" }
+local ui = { version = "1.2.6" }
 
 ui.config = {
     textScale = nil,     -- fixed monitor text scale; nil = pick by monitor size
@@ -379,7 +379,7 @@ end
 -- Converts the canvas to teletext characters and blits every row together
 -- with the info panel. Each character can show only two colours, so a cell
 -- keeps its most common colour and its most important other colour.
-local function render(state, L, pix, prio, lines, overlay)
+local function render(state, L, pix, prio, lines, marks)
     local device = state.device
     local ZW = L.ZW
     local bgIndex = index(ui.config.colors.background)
@@ -418,20 +418,32 @@ local function render(state, L, pix, prio, lines, overlay)
                     bit = bit * 2
                 end
             end
-            local mark = overlay and overlay.row == row + 1 and overlay.cells[col + 1]
             -- See-through cells: the background must be the character's own
             -- background, so its bottom-right pixel cannot be drawn. It moves
             -- to the pixel on its left, otherwise thin lines would have gaps.
-            local hasBg = see and (a == bgIndex or b == bgIndex)
-            if mark then
-                text[#text + 1] = mark
-                fg[#fg + 1] = HEX[overlay.color]
-                bk[#bk + 1] = (see and a == bgIndex) and SEE_THROUGH or HEX[a] -- the cell's main colour
-            elseif hasBg then
-                local colour = a == bgIndex and b or a
+            local hasBg = false
+            if see then
+                for k = 1, 6 do hasBg = hasBg or cell[k] == bgIndex end
+            end
+            if hasBg then
+                -- One colour only. Targets and their marks stay exact pixels,
+                -- the lines around them step aside; lines share the colour.
+                local colour, exact
+                local cellIndex = { i, i + 1, i + ZW, i + ZW + 1, i + 2 * ZW, i + 2 * ZW + 1 }
+                for k = 1, 6 do
+                    local p = cell[k]
+                    local mark = marks[cellIndex[k]]
+                    if p ~= bgIndex and ((mark and not exact) or (mark == exact and (not colour or prio[p] > prio[colour]))) then
+                        colour, exact = p, mark
+                    end
+                end
+                local function lit(k)
+                    if exact then return marks[cellIndex[k]] and cell[k] == colour end
+                    return cell[k] ~= bgIndex
+                end
                 local c, bit = 128, 1
                 for k = 1, 5 do
-                    if colour and (cell[k] ~= bgIndex or (k == 5 and cell[6] ~= bgIndex)) then c = c + bit end
+                    if colour and (lit(k) or (k == 5 and lit(6))) then c = c + bit end
                     bit = bit * 2
                 end
                 text[#text + 1] = c == 128 and " " or string.char(c)
@@ -514,20 +526,22 @@ local function paint(state)
         return L.cx + right * k, L.cy - up * k
     end
 
-    local markers, selected, overlay = {}, findTarget(targets, state.selected), nil
+    local markers, selected = {}, findTarget(targets, state.selected)
+    local marks = {} -- canvas pixels of targets and of the selection mark
+    local function markPixel(x, y, color)
+        setPixel(pix, L, x, y, color)
+        if x >= 0 and y >= 0 and x < L.ZW and y < L.PH then marks[y * L.ZW + x + 1] = true end
+    end
     local function marker(t)
         local px, py = project(t.x - ox, t.z - oz)
         local ddx, ddy = px - L.cx, py - L.cy
         local d, max = math.sqrt(ddx * ddx + ddy * ddy), L.R - 1.5
         if d > max then px, py = L.cx + ddx * max / d, L.cy + ddy * max / d end
-        local x0, y0 = math.floor(px - 0.5), math.floor(py - 0.5)
-        if state.device.transparent then x0, y0 = x0 - x0 % 2, y0 - y0 % 3 end -- whole 2x2 in a cell
-        local col = index(targetColor(t))
-        for yy = y0, y0 + 1 do
-            for xx = x0, x0 + 1 do setPixel(pix, L, xx, yy, col) end
-        end
+        local x, y = math.floor(px), math.floor(py)
+        if state.device.transparent and not drawable(x, y) then x = x - 1 end
+        markPixel(x, y, index(targetColor(t)))
         markers[#markers + 1] = { uuid = t.uuid, x = px, y = py }
-        return x0, y0, px, py
+        return x, y
     end
 
     for _, t in ipairs(targets) do
@@ -541,18 +555,20 @@ local function paint(state)
             local x1, y1 = project(selected.x - ox + v.x * ticks, selected.z - oz + v.z * ticks)
             drawLine(pix, L, x0, y0, x1, y1, index(c.velocity))
         end
-        -- Selection mark: arrow characters in the cells left and right of the
-        -- marker (► ■ ◄), so the mark is one text row high.
-        local x0, _, _, py = marker(selected)
-        local row = math.floor(py / 3) + 1
-        local left, right = math.floor(x0 / 2), math.floor((x0 + 1) / 2) + 2
+        -- Selection mark: small arrows pointing at the target from both sides.
+        -- Two pixels away they are always in other characters, so the target
+        -- keeps its colour (a character shows only two).
+        local x, y = marker(selected)
         local col = index(c.selected)
-        overlay = { row = row, cells = { [left] = "\16", [right] = "\17" }, color = col }
+        for _, side in ipairs({ -1, 1 }) do
+            markPixel(x + 2 * side, y, col)
+            for dy = -1, 1 do markPixel(x + 3 * side, y + dy, col) end
+        end
     end
     state.markers = markers
 
     local lines = L.info and panelLines(state, L, targets, info, front, range, selected) or nil
-    render(state, L, pix, prio, lines, overlay)
+    render(state, L, pix, prio, lines, marks)
     return selected
 end
 
