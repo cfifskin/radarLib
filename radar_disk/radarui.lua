@@ -19,7 +19,7 @@ target. Select a target with ui.select(device, uuid) or, on an advanced monitor,
 by touching it (needs ui.listen() running, see the README).
 ]]
 
-local ui = { version = "1.1.1" }
+local ui = { version = "1.2.0" }
 
 ui.config = {
     textScale = nil,     -- fixed monitor text scale; nil = pick by monitor size
@@ -28,6 +28,9 @@ ui.config = {
     infoWidth = 18,      -- minimum width of the info panel, in characters
     touchRadius = 4,     -- touch tolerance in radar pixels (a character is 2x3)
     velocitySeconds = 1, -- length of the selected target's velocity line
+    hudSize = { 40, 30 },  -- HUD glasses: radar size in grid cells at scale 1
+    hudGrid = { 256, 96 }, -- HUD glasses: grid over the whole screen, fits 16:9
+    hudMargin = 2,         -- HUD glasses: cells from the screen edge for named positions
     colors = {
         background = colors.black,
         ring = colors.green,
@@ -59,6 +62,16 @@ local FRONT = {
 
 local HEX = {}
 for i = 0, 15 do HEX[i] = ("0123456789abcdef"):sub(i + 1, i + 1) end
+
+-- HUD glasses: any non-hex background character leaves the cell transparent.
+local SEE_THROUGH = "-"
+
+-- Named HUD positions: share of the free space on the left and on the top.
+local ANCHORS = {
+    top_left = { 0, 0 }, top = { 0.5, 0 }, top_right = { 1, 0 },
+    left = { 0, 0.5 }, center = { 0.5, 0.5 }, right = { 1, 0.5 },
+    bottom_left = { 0, 1 }, bottom = { 0.5, 1 }, bottom_right = { 1, 1 },
+}
 
 -- Colour bitmask (colors.red) -> palette index 0..15.
 local function index(color)
@@ -301,7 +314,9 @@ end
 local function render(state, L, pix, prio, lines, overlay)
     local device = state.device
     local ZW = L.ZW
-    local bg = HEX[index(ui.config.colors.background)]
+    local bgIndex = index(ui.config.colors.background)
+    local see = device.transparent -- HUD: the background is left see-through
+    local bg = see and SEE_THROUGH or HEX[bgIndex]
     local cell, count = {}, {}
     for row = 0, L.H - 1 do
         local text, fg, bk = {}, {}, {}
@@ -336,10 +351,24 @@ local function render(state, L, pix, prio, lines, overlay)
                 end
             end
             local mark = overlay and overlay.row == row + 1 and overlay.cells[col + 1]
+            -- See-through cells: the background must be the character's own
+            -- background, so its bottom-right pixel cannot be drawn. It moves
+            -- to the pixel on its left, otherwise thin lines would have gaps.
+            local hasBg = see and (a == bgIndex or b == bgIndex)
             if mark then
                 text[#text + 1] = mark
                 fg[#fg + 1] = HEX[overlay.color]
-                bk[#bk + 1] = HEX[a] -- the cell's main colour (usually background)
+                bk[#bk + 1] = (see and a == bgIndex) and SEE_THROUGH or HEX[a] -- the cell's main colour
+            elseif hasBg then
+                local colour = a == bgIndex and b or a
+                local c, bit = 128, 1
+                for k = 1, 5 do
+                    if colour and (cell[k] ~= bgIndex or (k == 5 and cell[6] ~= bgIndex)) then c = c + bit end
+                    bit = bit * 2
+                end
+                text[#text + 1] = c == 128 and " " or string.char(c)
+                fg[#fg + 1] = HEX[colour or 0]
+                bk[#bk + 1] = SEE_THROUGH
             else
                 text[#text + 1] = string.char(code)
                 fg[#fg + 1] = HEX[fore]
@@ -491,6 +520,118 @@ function ui.draw(device, targets, info, front, showInfo, touch, textScale)
     state.last = { targets = targets, info = info, front = front, showInfo = showInfo == true }
     state.touch = touch == true
     return paint(state)
+end
+
+--- Radar area on HUD glasses (mod CC: HUD Glasses). The mod draws one grid of
+-- characters over the whole screen; this is a rectangle in that grid and works
+-- as a device for ui.draw:
+--
+--     local hud = ui.hud(peripheral.find("hud_glasses"), { scale = 2, position = "top_right" })
+--     ui.draw(hud, targets, info, "-z")
+--
+-- @param glasses the hud_glasses peripheral or its name
+-- @param opts    scale:      size multiplier, any number: the radar takes
+--                            config.hudSize * scale cells (1 by default)
+--                position:   name from ANCHORS ("top_right" by default) or
+--                            {x, y}, the top left cell, counted from 1
+--                margin:     cells from the screen edge for named positions
+--                background: true = black background instead of see-through
+--                grid:       {width, height} of the grid (config.hudGrid), false =
+--                            keep the grid as it is. Changing it clears the HUD.
+-- @return device with setScale(scale), setPosition(name | {x, y} | x, y), clear()
+function ui.hud(glasses, opts)
+    if type(glasses) == "string" then
+        local wrapped = peripheral.wrap(glasses)
+        if not wrapped then
+            error(("radarui: no peripheral named '%s'"):format(glasses), 2)
+        end
+        glasses = wrapped
+    end
+    if type(glasses) ~= "table" or type(glasses.blit) ~= "function" or type(glasses.setSize) ~= "function" then
+        error("radarui: bad argument #1 (hud_glasses peripheral expected)", 2)
+    end
+    opts = opts or {}
+    local cfg = ui.config
+    if opts.grid ~= false then
+        local grid = opts.grid or cfg.hudGrid
+        local w, h = glasses.getSize()
+        if w ~= grid[1] or h ~= grid[2] then glasses.setSize(grid[1], grid[2]) end
+        glasses.setHudFit("fit") -- the whole grid on screen, square pixels
+    end
+    local gridW, gridH = glasses.getSize()
+    local margin = opts.margin or cfg.hudMargin
+
+    local hud = { transparent = opts.background ~= true }
+    local W, H, X, Y            -- current rectangle
+    local scale, position = 1, "top_right"
+    local row, drawn = 1, {}    -- drawn = last picture, rows that did not change are skipped
+
+    local function erase()
+        if not W then return end
+        local blank, fg, bg = (" "):rep(W), ("0"):rep(W), SEE_THROUGH:rep(W)
+        for y = 0, H - 1 do
+            glasses.setCursorPos(X, Y + y)
+            glasses.blit(blank, fg, bg)
+        end
+        drawn = {}
+    end
+
+    -- Checks everything first: a bad value leaves the radar as it was.
+    local function place(newScale, newPosition, level)
+        if type(newScale) ~= "number" or newScale <= 0 then
+            error("radarui: HUD scale must be a positive number", level)
+        end
+        local w = math.floor(cfg.hudSize[1] * newScale + 0.5)
+        local h = math.floor(cfg.hudSize[2] * newScale + 0.5)
+        if w < 4 or h < 3 then
+            error(("radarui: HUD scale %g is too small (%dx%d cells)"):format(newScale, w, h), level)
+        end
+        if w > gridW or h > gridH then
+            error(("radarui: HUD scale %g needs %dx%d cells, the grid is %dx%d"):format(newScale, w, h, gridW, gridH), level)
+        end
+        local x, y
+        if type(newPosition) == "table" then
+            x, y = newPosition[1] or newPosition.x, newPosition[2] or newPosition.y
+            if type(x) ~= "number" or type(y) ~= "number" then
+                error("radarui: HUD position must be {x, y} or a name", level)
+            end
+            x, y = math.floor(x), math.floor(y)
+        else
+            local anchor = ANCHORS[newPosition]
+            if not anchor then
+                error(("radarui: unknown HUD position '%s'"):format(tostring(newPosition)), level)
+            end
+            x = math.floor(margin + (gridW - w - 2 * margin) * anchor[1]) + 1
+            y = math.floor(margin + (gridH - h - 2 * margin) * anchor[2]) + 1
+        end
+        erase()
+        W, H, X, Y, scale, position = w, h, x, y, newScale, newPosition
+    end
+
+    function hud.getSize() return W, H end
+    function hud.setCursorPos(_, y) row = y end
+    function hud.blit(text, fg, bg)
+        local line = text .. fg .. bg
+        if drawn[row] == line then return end
+        drawn[row] = line
+        glasses.setCursorPos(X, Y + row - 1)
+        glasses.blit(text, fg, bg)
+    end
+
+    --- Change the size; the picture comes back with the next ui.draw.
+    function hud.setScale(newScale) place(newScale, position, 3) end
+
+    --- Move the radar: setPosition("center"), setPosition({x, y}) or setPosition(x, y).
+    function hud.setPosition(x, y)
+        if y ~= nil then x = { x, y } end
+        place(scale, x, 3)
+    end
+
+    --- Remove the radar from the screen, other cells of the HUD stay.
+    function hud.clear() erase() end
+
+    place(opts.scale or 1, opts.position or "top_right", 3)
+    return hud
 end
 
 --- Select a target by uuid (or pass a target table). nil clears the selection.

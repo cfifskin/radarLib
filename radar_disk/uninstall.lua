@@ -7,12 +7,12 @@ local args = { ... }
 local all = args[1] == "all"
 
 local FILES = {
-    "lib/radar.lua", "lib/radarui.lua", "lib/ballistics.lua",
-    "startup/00_radarlib.lua",
+    "lib/radar.lua", "lib/radarui.lua",
+    "startup/00_radarlib.lua", "radarhelp.lua",
     ".radarlib_tmp", -- left over by an interrupted download
 }
-local EXAMPLES = { "radar_example.lua", "radar_ui_example.lua", "gun_example.lua" }
-local MODULES = { "radar", "radarui", "ballistics" }
+local EXAMPLES = { "radar_example.lua", "radar_ui_example.lua", "radar_hud_example.lua" }
+local MODULES = { "radar", "radarui" }
 
 local removed = 0
 local function remove(path)
@@ -35,6 +35,7 @@ if all then
 end
 removeIfEmpty("lib")
 removeIfEmpty("startup")
+if shell then shell.clearAlias("radarhelp") end
 
 -- Unregister the modules, so new programs no longer find them without a reboot.
 local registry = debug and debug.getregistry and debug.getregistry()

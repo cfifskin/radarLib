@@ -1,12 +1,11 @@
 -- Installed as /startup/00_radarlib.lua.
 -- CC:Tweaked gives every program its own package.path, but copies
 -- debug.getregistry()._LOADED into each program's package.loaded. Registering
--- the libraries there makes require("radar"), require("radarui") and
--- require("ballistics") work from any directory.
+-- the libraries there makes require("radar") and require("radarui") work from
+-- any directory.
 local MODULES = {
     { "radar", "/lib/radar.lua" },
     { "radarui", "/lib/radarui.lua" },
-    { "ballistics", "/lib/ballistics.lua" },
 }
 
 local registry = debug and debug.getregistry and debug.getregistry()
@@ -41,3 +40,6 @@ for _, module in ipairs(MODULES) do
         end
     end
 end
+
+-- "radarhelp" works from any directory.
+if shell and fs.exists("/radarhelp.lua") then shell.setAlias("radarhelp", "/radarhelp.lua") end
