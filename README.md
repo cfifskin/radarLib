@@ -17,7 +17,7 @@
 | `example.lua` | Пример. Копируется в `/radar_example.lua`, если такого файла ещё нет |
 | `example_ui.lua` | Пример экрана радара. Копируется в `/radar_ui_example.lua`, если такого файла ещё нет |
 | `example_hud.lua` | Пример радара на очках HUD Glasses. Копируется в `/radar_hud_example.lua`, если такого файла ещё нет |
-| `radarhelp.lua` | Справка для компьютера, ставится как `/radarhelp.lua` |
+| `radarLib.md` | Справка для компьютера, ставится как `/help/radarLib.md` |
 | `get.lua` | Установка с GitHub одной командой |
 
 ## Установка одной командой (нужен HTTP в CC)
@@ -36,7 +36,7 @@ wget run https://raw.githubusercontent.com/cfifskin/radarLib/main/radar_disk/get
 
 ## Справка на компьютере
 
-После установки справка доступна прямо в игре из любой папки: `radarhelp` показывает список тем, `radarhelp hud` — одну тему.
+После установки справка открывается как обычная тема CraftOS: `help radarLib`. Регистр букв важен. Стрелки вверх и вниз прокручивают текст, влево и вправо переходят между разделами, Q закрывает.
 
 ## Установка с дискеты
 
@@ -56,7 +56,7 @@ wget run https://raw.githubusercontent.com/cfifskin/radarLib/main/radar_disk/uni
 
 С дискеты: `disk/uninstall` или `disk/install remove`.
 
-Удаляются `/lib/radar.lua`, `/lib/radarui.lua`, загрузчик `/startup/00_radarlib.lua` и пустые после этого папки `/lib` и `/startup`. Ваши собственные файлы в них не трогаются. Примеры (`radar_example.lua`, `radar_ui_example.lua`, `radar_hud_example.lua`) остаются, потому что вы могли их изменить. Чтобы удалить и их, добавьте `all`: `wget run …/uninstall.lua all` или `disk/uninstall all`.
+Удаляются `/lib/radar.lua`, `/lib/radarui.lua`, загрузчик `/startup/00_radarlib.lua`, справка `/help/radarLib.md` и пустые после этого папки `/lib`, `/startup` и `/help`. Ваши собственные файлы в них не трогаются. Примеры (`radar_example.lua`, `radar_ui_example.lua`, `radar_hud_example.lua`) остаются, потому что вы могли их изменить. Чтобы удалить и их, добавьте `all`: `wget run …/uninstall.lua all` или `disk/uninstall all`.
 
 Модули сразу снимаются с регистрации, так что новые программы их уже не найдут. Программы, которые работают в момент удаления, держат библиотеку в памяти до перезагрузки.
 

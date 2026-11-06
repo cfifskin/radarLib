@@ -8,7 +8,7 @@ local here = fs.getDir(shell.getRunningProgram())
 local LIB = "lib/radar.lua"
 local UI = "lib/radarui.lua"
 local LOADER = "startup/00_radarlib.lua"
-local HELP = "radarhelp.lua"
+local HELP = "help/radarLib.md"
 local EXAMPLE = "radar_example.lua"
 local UI_EXAMPLE = "radar_ui_example.lua"
 local HUD_EXAMPLE = "radar_hud_example.lua"
@@ -33,7 +33,8 @@ end
 copy("radar.lua", LIB)
 copy("radarui.lua", UI)
 copy("loader.lua", LOADER)
-copy("radarhelp.lua", HELP)
+copy("radarLib.md", HELP)
+if fs.exists("radarhelp.lua") then fs.delete("radarhelp.lua") end -- replaced by help radarLib
 if not fs.exists(EXAMPLE) then copy("example.lua", EXAMPLE) end
 if not fs.exists(UI_EXAMPLE) then copy("example_ui.lua", UI_EXAMPLE) end
 if not fs.exists(HUD_EXAMPLE) then copy("example_hud.lua", HUD_EXAMPLE) end
@@ -49,5 +50,5 @@ print("  /" .. HELP)
 print("  /" .. EXAMPLE .. ", /" .. UI_EXAMPLE .. ", /" .. HUD_EXAMPLE .. " (examples)")
 print('Use: local radar = require("radar")')
 print('     local ui = require("radarui")')
-print("Help: radarhelp")
+print("Help: help radarLib")
 print("You can remove the disk now.")

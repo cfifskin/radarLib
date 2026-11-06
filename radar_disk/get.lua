@@ -5,7 +5,7 @@
 --   wget run https://raw.githubusercontent.com/cfifskin/radarLib/main/radar_disk/get.lua disk
 local BASE = "https://raw.githubusercontent.com/cfifskin/radarLib/main/radar_disk/"
 local FILES = {
-    "radar.lua", "radarui.lua", "install.lua", "uninstall.lua", "loader.lua", "startup.lua", "radarhelp.lua",
+    "radar.lua", "radarui.lua", "install.lua", "uninstall.lua", "loader.lua", "startup.lua", "radarLib.md",
     "example.lua", "example_ui.lua", "example_hud.lua",
 }
 

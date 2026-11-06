@@ -41,5 +41,5 @@ for _, module in ipairs(MODULES) do
     end
 end
 
--- "radarhelp" works from any directory.
-if shell and fs.exists("/radarhelp.lua") then shell.setAlias("radarhelp", "/radarhelp.lua") end
+-- Topics in /help work with the help program: help radarLib
+if help and not help.path():find(":/help", 1, true) then help.setPath(help.path() .. ":/help") end
